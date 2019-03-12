@@ -29,14 +29,15 @@ import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.PriorityQueue;
+import java.util.Set;
 
 /**
  * GroupMessengerActivity is the main Activity for the assignment.
- * 
+ *
  * @author stevko
  *
  */
@@ -45,12 +46,15 @@ public class GroupMessengerActivity extends Activity {
     static final String TAG = GroupMessengerActivity.class.getSimpleName();
     static final String[] REMOTE_PORTS = {"11108", "11112", "11116", "11120", "11124"};
     static final int SERVER_PORT = 10000;
+    static Set<String> FAILED_PORT = new HashSet<String>();
     int fifo_seq = 0;
+    String failPort;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_group_messenger);
+
 
         /*
          * TODO: Use the TextView to display your messages. Though there is no grading component
@@ -159,18 +163,7 @@ public class GroupMessengerActivity extends Activity {
 //                    System.out.println(line);
                     String[] strs = line.split(",");
 
-                    if (!strs[0].equals("agreed")){
-
-                        total_seq += 1;
-                        message msg = new message(strs[2], strs[1], Integer.valueOf(strs[0]), total_seq, false);
-                        pq.add(msg);
-                        out.writeUTF(Integer.toString(total_seq));
-                        // need time out
-                        ((DataOutputStream) out).close();
-
-                    }
-                    else {
-
+                    if (strs[0].equals("agreed")){
                         int agreedSeq = Integer.valueOf(strs[1]);
                         total_seq = Math.max(agreedSeq, total_seq);
                         String clientPort = strs[3];
@@ -186,11 +179,30 @@ public class GroupMessengerActivity extends Activity {
                         }
                         while (pq.peek() != null && pq.peek().agreed) {
 
-                                message head = pq.poll();
-                                publishProgress(head.content);
-                                //System.out.println(head.content);
-
+                            message head = pq.poll();
+                            publishProgress(head.content);
+                            //System.out.println(head.content);
                         }
+                    }
+                    else if (strs[0].equals("inform")){
+                        failPort = strs[1];
+                        FAILED_PORT.add(strs[1]);
+                        //System.out.println("remove" + strs[1]);
+                        Iterator it = pq.iterator();
+                        while(it.hasNext()){
+                            message temp = (message) it.next();
+                            if(temp.clientPort.equals(strs[1]) && !temp.agreed){
+                                it.remove();
+                            }
+                        }
+                    }
+                    else {
+                        total_seq += 1;
+                        message msg = new message(strs[2], strs[1], Integer.valueOf(strs[0]), total_seq, false);
+                        pq.add(msg);
+                        out.writeUTF(Integer.toString(total_seq));
+                        ((DataOutputStream) out).close();
+
                     }
                     in.close();
                     socket.close();
@@ -247,83 +259,90 @@ public class GroupMessengerActivity extends Activity {
             List<Integer> propoArray = new ArrayList<Integer>();
 
             for (String remote_port: REMOTE_PORTS) {
-                try {
-                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-                            Integer.parseInt(remote_port));
+                if (!FAILED_PORT.contains(remote_port)){
+                    try {
+                        Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                                Integer.parseInt(remote_port));
 
-                    String msgToSend =  Integer.toString(fifo_seq) + ","+ msgs[1] + "," +msgs[0];
-                    DataOutput out = new DataOutputStream(socket.getOutputStream());
-                    out.writeUTF(msgToSend);
+                        String msgToSend = Integer.toString(fifo_seq) + "," + msgs[1] + "," + msgs[0];
+                        DataOutput out = new DataOutputStream(socket.getOutputStream());
+                        out.writeUTF(msgToSend);
 
-                    DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
-                    try{
-                        String proposed_str = in.readUTF();
-                        int proposedSeq = Integer.valueOf(proposed_str);
-                        propoArray.add(proposedSeq);
+                        DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
+                        socket.setSoTimeout(500);
+                        try {
+                            String proposed_str = in.readUTF();
+                            int proposedSeq = Integer.valueOf(proposed_str);
+                            propoArray.add(proposedSeq);
 
-                    }catch (IOException e){
-                        System.out.print(e);
+                        } catch (IOException e) {
+                            System.out.print(e);
+                            failPort = remote_port;
+                            FAILED_PORT.add(failPort);
+
+                            ((DataOutputStream) out).close();
+                            socket.close();
+                            //System.out.println("failed port found" + remote_port);
+                            informFailure();
+                        }
+
+                        if (!socket.isClosed()) {
+                            ((DataOutputStream) out).close();
+                            socket.close();
+                        }
+                    } catch (UnknownHostException e) {
+                        Log.e(TAG, "ClientTask UnknownHostException");
+                    } catch (IOException e) {
+                        Log.e(TAG, "ClientTask socket IOException");
                     }
-                    ((DataOutputStream) out).close();
-                    socket.close();
-
-                    //socketArray.add(socket);
-                } catch (UnknownHostException e) {
-                    Log.e(TAG, "ClientTask UnknownHostException");
-                } catch (IOException e){
-                    Log.e(TAG, "ClientTask socket IOException");
-                }
-
+            }
             }
             int agreedSeq = Collections.max(propoArray);
             for (String remote_port: REMOTE_PORTS) {
-                try {
-                    Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
-                            Integer.parseInt(remote_port));
-                    String agreedMsg = "agreed," + Integer.toString(agreedSeq) + "," +
-                            Integer.toString(fifo_seq) + "," + msgs[1] + "," + msgs[0];
+                if (!FAILED_PORT.contains(remote_port)) {
+                    try {
+                        Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                                Integer.parseInt(remote_port));
+                        String agreedMsg = "agreed," + Integer.toString(agreedSeq) + "," +
+                                Integer.toString(fifo_seq) + "," + msgs[1] + "," + msgs[0];
 
+                        DataOutput out = new DataOutputStream(socket.getOutputStream());
+                        out.writeUTF(agreedMsg);
+                        ((DataOutputStream) out).close();
+                        socket.close();
 
-                    //String msgToSend = msgs[0] + "," + msgs[1] + "," + Integer.toString(fifo_seq);
-                    DataOutput out = new DataOutputStream(socket.getOutputStream());
-                    out.writeUTF(agreedMsg);
-//                    DataInputStream in = new DataInputStream(new BufferedInputStream(socket.getInputStream()));
-//                    try{
-//                        String proposed_str = in.readUTF();
-//                        int proposedSeq = Integer.valueOf(proposed_str);
-//                        propoArray.add(proposedSeq);
-//
-//                    }catch (IOException e){
-//                        System.out.print(e);
-//                    }
-                    ((DataOutputStream) out).close();
-                    socket.close();
+                    } catch (UnknownHostException e) {
+                        Log.e(TAG, "ClientTask UnknownHostException");
+                    } catch (IOException e) {
+                        Log.e(TAG, "ClientTask socket IOException");
+                    }
+                }
+            }
+            return null;
+        }
+        private void informFailure(){
 
-                    //socketArray.add(socket);
-                } catch (UnknownHostException e) {
-                    Log.e(TAG, "ClientTask UnknownHostException");
-                } catch (IOException e){
-                    Log.e(TAG, "ClientTask socket IOException");
+            for (String remote_port: REMOTE_PORTS) {
+                if (!FAILED_PORT.contains(remote_port)) {
+                    try {
+                        Socket socket = new Socket(InetAddress.getByAddress(new byte[]{10, 0, 2, 2}),
+                                Integer.parseInt(remote_port));
+                        String informMsg = "inform," + failPort;
+                        System.out.println("send to " + remote_port);
+
+                        DataOutput out = new DataOutputStream(socket.getOutputStream());
+                        out.writeUTF(informMsg);
+                        ((DataOutputStream) out).close();
+                        socket.close();
+
+                    } catch (UnknownHostException e) {
+                        Log.e(TAG, "ClientTask UnknownHostException");
+                    } catch (IOException e) {
+                        Log.e(TAG, "ClientTask socket IOException");
+                    }
                 }
 
             }
-
-//            for (Socket s: socketArray){
-//                try{
-//                    String agreedMsg = msgs[0] + "," + msgs[1] + "," + Integer.toString(fifo_seq) + ","
-//                            + "agreed," + Integer.toString(agreedSeq);
-//                    DataOutput out = new DataOutputStream(s.getOutputStream());
-//                    out.writeUTF(agreedMsg);
-//
-//
-//                }catch (IOException e){
-//                    Log.e(TAG, "Can get output stream");
-//
-//                    System.out.println("cant output agree");
-//                }
-//            }
-            //socketArray.clear();
-            return null;
         }
     }
 }
